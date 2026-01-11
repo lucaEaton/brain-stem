@@ -1,3 +1,16 @@
+import warnings
+
+# gpt gave me this to jus clear the logs for now
+warnings.filterwarnings(
+    "ignore",
+    message="PySoundFile failed.*"
+)
+
+warnings.filterwarnings(
+    "ignore",
+    message="librosa.core.audio.__audioread_load.*"
+)
+
 from torch.utils.data import DataLoader
 from model import UNet
 from dataset.dataset import musdb18
@@ -37,21 +50,38 @@ testing_set = DataLoader(testing_data,
                          batch_size=8,
                          shuffle=True)
 
+
+def accuracy_tol(y_true, y_pred, tol=0.05):
+    correct = (torch.abs(y_true - y_pred) < tol).float().mean()
+    return (correct * 100).item()
+
+
 torch.manual_seed(67)
+
 if __name__ == '__main__':
     epochs = 40
+    print('Training Loop Begin')
     for epoch in range(epochs):
-        model_stem_splitter.train()
         total_train_loss = 0
+        model_stem_splitter.train()
 
         if epoch == 20:
             # set learning rate to 1e^-4
-            pass
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = 0.0001
 
         for batch in training_set:
             a = 1.0  # due to (1-a), this removes the others acc,
             # completely ignoring it, assuming it will make the vocals clearly n better
             mixture, vocals, song_name = batch
+
+            # mps (apple silicon) doesn't support float64 idk
+            mixture = mixture.to(device, dtype=torch.float32)
+            vocals = vocals.to(device, dtype=torch.float32)
+            if vocals.dim() == 3:
+                vocals = vocals.unsqueeze(1)
+            if mixture.dim() == 3:
+                mixture = mixture.unsqueeze(1)
 
             vocal_pred = model_stem_splitter(mixture)
 
@@ -60,34 +90,47 @@ if __name__ == '__main__':
 
             # if mixture is vocals + others, then maybe acc according to the paper is acc = mix - vocals?
             # ~ (1-a) * loss(mixture, channel(mixture))
-            loss_acc = (1 - a) * loss_fn(mixture-vocals, mixture-vocal_pred)
-
+            # mixture - vocal_pred < 0
+            loss_acc = (1 - a) * loss_fn(mixture - vocals, mixture - vocal_pred)
             # a * loss(vocal, channel(vocal)) + (1-a) * loss(mixture, channel(mixture)) = loss for vocal stems
             # current weight ~ reference to paper in the Fig on Pg.3, Section 2.2
             loss_train = loss_vocal + loss_acc
 
+            train_accuracy = accuracy_tol(vocals, vocal_pred)
+
             optimizer.zero_grad()
-            loss_train.backwards()
+            loss_train.backward()
             optimizer.step()
 
             total_train_loss += loss_train.item()
-
+            total_train_loss = total_train_loss / len(training_set)
+        print('Eval Loop Begin')
         model_stem_splitter.eval()
+        total_test_loss = 0
         with torch.inference_mode():
-            model_stem_splitter.eval()
-            total_test_loss = 0
 
             for batch in testing_set:
                 a = 1.0
                 mixture, vocals, song_name = batch
+
+                # mps *(apple silicon) doesn't support float64 idk
+                mixture = mixture.to(device, dtype=torch.float32)
+                vocals = vocals.to(device, dtype=torch.float32)
+                if vocals.dim() == 3:
+                    vocals = vocals.unsqueeze(1)
+                if mixture.dim() == 3:
+                    mixture = mixture.unsqueeze(1)
+
                 vocal_test = model_stem_splitter(mixture)
 
                 vocal_test_loss = a * loss_fn(vocals, vocal_test)
-                acc_test_loss = (1 - a) * loss_fn(mixture-vocals, vocal_test)
+                acc_test_loss = (1 - a) * loss_fn(mixture - vocals, mixture - vocal_test)
                 test_loss = vocal_test_loss + acc_test_loss
 
+                test_accuracy = accuracy_tol(vocals, vocal_test)
+
                 total_test_loss += test_loss.item()
+                total_test_loss = total_test_loss / len(testing_set)
 
         # grabbed from documentation
-        if epoch % 100 == 0:
-            print(f"Epoch: {epoch} | Loss: {total_test_loss:.5f} | Test loss: {total_test_loss:.5f}")
+        print(f"Epoch: {epoch} | Loss: {total_train_loss:.5f} | Acc: {train_accuracy:.5f} | Test loss: {total_test_loss:.5f} | Acc: {test_accuracy:.5f}")

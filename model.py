@@ -55,6 +55,9 @@ class UNet(nn.Module):
         self.mp = nn.MaxPool2d(2, 2)
 
     def forward(self, x):
+        if x.dim() == 3:
+            x = x.unsqueeze(1)
+
         x0 = self.cb0(x)
         xp0 = self.mp(x0)
         x1 = self.cb1(xp0)
